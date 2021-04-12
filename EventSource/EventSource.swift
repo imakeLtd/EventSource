@@ -14,7 +14,7 @@ public enum EventSourceState {
     case closed
 }
 
-open class EventSource: NSObject, URLSessionDataDelegate {
+open class IKEventSource: NSObject, URLSessionDataDelegate {
 	static let DefaultsKey = "com.inaka.eventSource.lastEventId"
 
     let url: URL
@@ -31,13 +31,13 @@ open class EventSource: NSObject, URLSessionDataDelegate {
     internal var task: URLSessionDataTask?
     fileprivate var operationQueue: OperationQueue
     fileprivate var errorBeforeSetErrorCallBack: NSError?
-    internal let receivedDataBuffer: NSMutableData
 	fileprivate let uniqueIdentifier: String
     fileprivate let validNewlineCharacters = ["\r\n", "\n", "\r"]
 
     var event = Dictionary<String, String>()
 
 
+    @objc
     public init(url: String, headers: [String : String] = [:]) {
 
         self.url = URL(string: url)!
@@ -45,7 +45,6 @@ open class EventSource: NSObject, URLSessionDataDelegate {
         self.readyState = EventSourceState.closed
         self.operationQueue = OperationQueue()
         self.receivedString = nil
-        self.receivedDataBuffer = NSMutableData()
 
         let port = String(self.url.port ?? 80)
 		let relativePath = self.url.relativePath
@@ -53,15 +52,17 @@ open class EventSource: NSObject, URLSessionDataDelegate {
         let scheme = self.url.scheme ?? ""
 
 		self.uniqueIdentifier = "\(scheme).\(host).\(port).\(relativePath)"
-		self.lastEventIDKey = "\(EventSource.DefaultsKey).\(self.uniqueIdentifier)"
+		self.lastEventIDKey = "\(IKEventSource.DefaultsKey).\(self.uniqueIdentifier)"
 
         super.init()
         self.connect()
     }
+    
 
 //Mark: Connect
 
-    func connect() {
+    @objc
+   open func connect() {
         var additionalHeaders = self.headers
         if let eventID = self.lastEventID {
             additionalHeaders["Last-Event-Id"] = eventID
@@ -93,7 +94,7 @@ open class EventSource: NSObject, URLSessionDataDelegate {
     }
 
 //Mark: Close
-
+    @objc
     open func close() {
         self.readyState = EventSourceState.closed
         self.urlSession?.invalidateAndCancel()
@@ -113,10 +114,12 @@ open class EventSource: NSObject, URLSessionDataDelegate {
 
 //Mark: EventListeners
 
+    @objc
     open func onOpen(_ onOpenCallback: @escaping (() -> Void)) {
         self.onOpenCallback = onOpenCallback
     }
 
+    @objc
     open func onError(_ onErrorCallback: @escaping ((NSError?) -> Void)) {
         self.onErrorCallback = onErrorCallback
 
@@ -126,24 +129,29 @@ open class EventSource: NSObject, URLSessionDataDelegate {
         }
     }
 
+    @objc
     open func onMessage(_ onMessageCallback: @escaping ((_ id: String?, _ event: String?, _ data: String?) -> Void)) {
         self.onMessageCallback = onMessageCallback
     }
 
+    @objc
     open func addEventListener(_ event: String, handler: @escaping ((_ id: String?, _ event: String?, _ data: String?) -> Void)) {
         self.eventListeners[event] = handler
     }
 
+    @objc
 	open func removeEventListener(_ event: String) -> Void {
 		self.eventListeners.removeValue(forKey: event)
 	}
 
+    @objc
 	open func events() -> Array<String> {
 		return Array(self.eventListeners.keys)
 	}
 
 //MARK: URLSessionDataDelegate
 
+    
     open func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
 		if self.receivedMessageToClose(dataTask.response as? HTTPURLResponse) {
 			return
@@ -152,9 +160,9 @@ open class EventSource: NSObject, URLSessionDataDelegate {
 		if self.readyState != EventSourceState.open {
             return
         }
-
-        self.receivedDataBuffer.append(data)
-        let eventStream = extractEventsFromBuffer()
+        let buffer = NSMutableData()
+        buffer.append(data)
+        let eventStream = extractEventsFromBuffer(buffer: buffer)
         self.parseEventStream(eventStream)
     }
 
@@ -199,15 +207,15 @@ open class EventSource: NSObject, URLSessionDataDelegate {
 
 //MARK: Helpers
 
-    fileprivate func extractEventsFromBuffer() -> [String] {
+    fileprivate func extractEventsFromBuffer(buffer: NSMutableData) -> [String] {
         var events = [String]()
 
         // Find first occurrence of delimiter
-		var searchRange =  NSRange(location: 0, length: receivedDataBuffer.length)
-        while let foundRange = searchForEventInRange(searchRange) {
+		var searchRange =  NSRange(location: 0, length: buffer.length)
+        while let foundRange = searchForEventInRange(searchRange, buffer: buffer) {
             // Append event
             if foundRange.location > searchRange.location {
-                let dataChunk = receivedDataBuffer.subdata(
+                let dataChunk = buffer.subdata(
 					with: NSRange(location: searchRange.location, length: foundRange.location - searchRange.location)
                 )
 
@@ -217,20 +225,19 @@ open class EventSource: NSObject, URLSessionDataDelegate {
             }
             // Search for next occurrence of delimiter
             searchRange.location = foundRange.location + foundRange.length
-            searchRange.length = receivedDataBuffer.length - searchRange.location
+            searchRange.length = buffer.length - searchRange.location
         }
 
         // Remove the found events from the buffer
-        self.receivedDataBuffer.replaceBytes(in: NSRange(location: 0, length: searchRange.location), withBytes: nil, length: 0)
-
+        buffer.replaceBytes(in: NSRange(location: 0, length: searchRange.location), withBytes: nil, length: 0)
         return events
     }
 
-    fileprivate func searchForEventInRange(_ searchRange: NSRange) -> NSRange? {
+    fileprivate func searchForEventInRange(_ searchRange: NSRange, buffer: NSMutableData) -> NSRange? {
         let delimiters = validNewlineCharacters.map { "\($0)\($0)".data(using: String.Encoding.utf8)! }
 
         for delimiter in delimiters {
-            let foundRange = receivedDataBuffer.range(of: delimiter,
+            let foundRange = buffer.range(of: delimiter,
                                                             options: NSData.SearchOptions(),
                                                             in: searchRange)
             if foundRange.location != NSNotFound {
@@ -265,12 +272,9 @@ open class EventSource: NSObject, URLSessionDataDelegate {
 
         for parsedEvent in parsedEvents {
             self.lastEventID = parsedEvent.id
-
-            if parsedEvent.event == nil {
-                if let data = parsedEvent.data, let onMessage = self.onMessageCallback {
-                    DispatchQueue.main.async {
-                        onMessage(self.lastEventID, "message", data)
-                    }
+            if let data = parsedEvent.data, let onMessage = self.onMessageCallback {
+                DispatchQueue.main.async {
+                    onMessage(self.lastEventID, parsedEvent.event, data)
                 }
             }
 
@@ -321,7 +325,7 @@ open class EventSource: NSObject, URLSessionDataDelegate {
             }
         }
 
-        return (event["id"], event["event"], event["data"])
+        return (NSUUID().uuidString, event["event"], event["data"])
     }
 
     fileprivate func parseKeyValuePair(_ line: String) -> (String?, String?) {
